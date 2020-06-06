@@ -121,3 +121,5 @@ $ git clone https://github.com/brendangregg/FlameGraph.git
 $go-torch -u http://127.0.0.1:10186 -t 30
 ```
 生成torch.svg
+
+![https://github.com/HuoRen/go-ws/blob/master/test/火焰图.jpg](https://github.com/HuoRen/go-ws/blob/master/test/火焰图.jpg)
