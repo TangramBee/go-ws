@@ -1,0 +1,1360 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="678" onload="init(evt)" viewBox="0 0 1200 678" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+	}
+
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+		}
+		else if (e.target.id == "unzoom") unzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+	}, false)
+
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+		return;
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) {
+				currentSearchTerm = term;
+				search();
+			}
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (currentSearchTerm === null) return;
+		var term = currentSearchTerm;
+
+		var re = new RegExp(term, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="678.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="661" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="661" > </text>
+<g id="frames">
+<g >
+<title>internal/poll.(*FD).Read (1 samples, 2.56%)</title><rect x="796.7" y="565" width="30.2" height="15.0" fill="rgb(207,53,54)" rx="2" ry="2" />
+<text  x="799.67" y="575.5" >in..</text>
+</g>
+<g >
+<title>bufio.(*Reader).Peek (3 samples, 7.69%)</title><rect x="131.0" y="581" width="90.8" height="15.0" fill="rgb(231,73,40)" rx="2" ry="2" />
+<text  x="134.03" y="591.5" >bufio.(*Re..</text>
+</g>
+<g >
+<title>internal/poll.(*FD).Write (2 samples, 5.13%)</title><rect x="463.8" y="149" width="60.6" height="15.0" fill="rgb(211,94,53)" rx="2" ry="2" />
+<text  x="466.85" y="159.5" >intern..</text>
+</g>
+<g >
+<title>time.now (1 samples, 2.56%)</title><rect x="1159.7" y="613" width="30.3" height="15.0" fill="rgb(211,192,34)" rx="2" ry="2" />
+<text  x="1162.74" y="623.5" >ti..</text>
+</g>
+<g >
+<title>runtime.entersyscall_sysmon (1 samples, 2.56%)</title><rect x="191.5" y="389" width="30.3" height="15.0" fill="rgb(232,20,39)" rx="2" ry="2" />
+<text  x="194.54" y="399.5" >ru..</text>
+</g>
+<g >
+<title>net.(*Resolver).internetAddrList (1 samples, 2.56%)</title><rect x="524.4" y="181" width="30.2" height="15.0" fill="rgb(234,184,31)" rx="2" ry="2" />
+<text  x="527.36" y="191.5" >ne..</text>
+</g>
+<g >
+<title>github.com/gomodule/redigo/redis.(*Pool).Get (5 samples, 12.82%)</title><rect x="463.8" y="309" width="151.3" height="15.0" fill="rgb(237,169,28)" rx="2" ry="2" />
+<text  x="466.85" y="319.5" >github.com/gomodule..</text>
+</g>
+<g >
+<title>runtime.typedmemmove (1 samples, 2.56%)</title><rect x="615.1" y="181" width="30.3" height="15.0" fill="rgb(229,197,18)" rx="2" ry="2" />
+<text  x="618.13" y="191.5" >ru..</text>
+</g>
+<g >
+<title>io.ReadAtLeast (1 samples, 2.56%)</title><rect x="433.6" y="277" width="30.2" height="15.0" fill="rgb(206,218,10)" rx="2" ry="2" />
+<text  x="436.59" y="287.5" >io..</text>
+</g>
+<g >
+<title>runtime.chansend1 (1 samples, 2.56%)</title><rect x="282.3" y="565" width="30.3" height="15.0" fill="rgb(240,150,46)" rx="2" ry="2" />
+<text  x="285.31" y="575.5" >ru..</text>
+</g>
+<g >
+<title>encoding/json.mapEncoder.encode (1 samples, 2.56%)</title><rect x="615.1" y="245" width="30.3" height="15.0" fill="rgb(230,15,15)" rx="2" ry="2" />
+<text  x="618.13" y="255.5" >en..</text>
+</g>
+<g >
+<title>net/http.(*connReader).abortPendingRead (1 samples, 2.56%)</title><rect x="342.8" y="581" width="30.3" height="15.0" fill="rgb(236,68,35)" rx="2" ry="2" />
+<text  x="345.82" y="591.5" >ne..</text>
+</g>
+<g >
+<title>runtime.mapaccess1_faststr (1 samples, 2.56%)</title><rect x="252.1" y="533" width="30.2" height="15.0" fill="rgb(244,48,5)" rx="2" ry="2" />
+<text  x="255.05" y="543.5" >ru..</text>
+</g>
+<g >
+<title>sync.(*Pool).Get (1 samples, 2.56%)</title><rect x="373.1" y="293" width="30.2" height="15.0" fill="rgb(216,74,16)" rx="2" ry="2" />
+<text  x="376.08" y="303.5" >sy..</text>
+</g>
+<g >
+<title>net/http.(*body).Read (2 samples, 5.13%)</title><rect x="645.4" y="373" width="60.5" height="15.0" fill="rgb(251,155,4)" rx="2" ry="2" />
+<text  x="648.38" y="383.5" >net/ht..</text>
+</g>
+<g >
+<title>crypto/rand.(*devReader).Read (1 samples, 2.56%)</title><rect x="433.6" y="261" width="30.2" height="15.0" fill="rgb(243,68,28)" rx="2" ry="2" />
+<text  x="436.59" y="271.5" >cr..</text>
+</g>
+<g >
+<title>runtime.greyobject (1 samples, 2.56%)</title><rect x="978.2" y="533" width="30.3" height="15.0" fill="rgb(215,26,37)" rx="2" ry="2" />
+<text  x="981.21" y="543.5" >ru..</text>
+</g>
+<g >
+<title>syscall.read (1 samples, 2.56%)</title><rect x="796.7" y="533" width="30.2" height="15.0" fill="rgb(213,178,20)" rx="2" ry="2" />
+<text  x="799.67" y="543.5" >sy..</text>
+</g>
+<g >
+<title>net.(*sysDialer).dialTCP (2 samples, 5.13%)</title><rect x="554.6" y="165" width="60.5" height="15.0" fill="rgb(216,47,10)" rx="2" ry="2" />
+<text  x="557.62" y="175.5" >net.(*..</text>
+</g>
+<g >
+<title>runtime.gcBgMarkWorker.func2 (5 samples, 12.82%)</title><rect x="857.2" y="581" width="151.3" height="15.0" fill="rgb(208,76,25)" rx="2" ry="2" />
+<text  x="860.18" y="591.5" >runtime.gcBgMarkWor..</text>
+</g>
+<g >
+<title>net.(*conn).Read (1 samples, 2.56%)</title><rect x="221.8" y="469" width="30.3" height="15.0" fill="rgb(219,184,22)" rx="2" ry="2" />
+<text  x="224.79" y="479.5" >ne..</text>
+</g>
+<g >
+<title>runtime.futexsleep (1 samples, 2.56%)</title><rect x="1099.2" y="517" width="30.3" height="15.0" fill="rgb(252,144,18)" rx="2" ry="2" />
+<text  x="1102.23" y="527.5" >ru..</text>
+</g>
+<g >
+<title>net.internetSocket (2 samples, 5.13%)</title><rect x="554.6" y="133" width="60.5" height="15.0" fill="rgb(224,145,48)" rx="2" ry="2" />
+<text  x="557.62" y="143.5" >net.in..</text>
+</g>
+<g >
+<title>net/http.(*response).finishRequest (2 samples, 5.13%)</title><rect x="312.6" y="597" width="60.5" height="15.0" fill="rgb(254,28,33)" rx="2" ry="2" />
+<text  x="315.56" y="607.5" >net/ht..</text>
+</g>
+<g >
+<title>net.(*netFD).Write (2 samples, 5.13%)</title><rect x="463.8" y="165" width="60.6" height="15.0" fill="rgb(216,212,37)" rx="2" ry="2" />
+<text  x="466.85" y="175.5" >net.(*..</text>
+</g>
+<g >
+<title>runtime.findObject (1 samples, 2.56%)</title><rect x="947.9" y="533" width="30.3" height="15.0" fill="rgb(240,22,13)" rx="2" ry="2" />
+<text  x="950.95" y="543.5" >ru..</text>
+</g>
+<g >
+<title>runtime.pcdatavalue (1 samples, 2.56%)</title><rect x="887.4" y="421" width="30.3" height="15.0" fill="rgb(240,120,40)" rx="2" ry="2" />
+<text  x="890.44" y="431.5" >ru..</text>
+</g>
+<g >
+<title>net/http.(*body).readLocked (2 samples, 5.13%)</title><rect x="645.4" y="357" width="60.5" height="15.0" fill="rgb(207,172,24)" rx="2" ry="2" />
+<text  x="648.38" y="367.5" >net/ht..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Context).Next (12 samples, 30.77%)</title><rect x="373.1" y="453" width="363.1" height="15.0" fill="rgb(219,89,44)" rx="2" ry="2" />
+<text  x="376.08" y="463.5" >github.com/gin-gonic/gin.(*Context).Next</text>
+</g>
+<g >
+<title>bufio.(*Reader).ReadSlice (1 samples, 2.56%)</title><rect x="221.8" y="517" width="30.3" height="15.0" fill="rgb(247,109,27)" rx="2" ry="2" />
+<text  x="224.79" y="527.5" >bu..</text>
+</g>
+<g >
+<title>go-ws/handler.SendMessageHandler (8 samples, 20.51%)</title><rect x="373.1" y="341" width="242.0" height="15.0" fill="rgb(248,9,0)" rx="2" ry="2" />
+<text  x="376.08" y="351.5" >go-ws/handler.SendMessageHandler</text>
+</g>
+<g >
+<title>runtime.selectgo (1 samples, 2.56%)</title><rect x="40.3" y="597" width="30.2" height="15.0" fill="rgb(254,195,53)" rx="2" ry="2" />
+<text  x="43.26" y="607.5" >ru..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*node).getValue (1 samples, 2.56%)</title><rect x="766.4" y="549" width="30.3" height="15.0" fill="rgb(216,3,52)" rx="2" ry="2" />
+<text  x="769.41" y="559.5" >gi..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Context).ShouldBind (1 samples, 2.56%)</title><rect x="403.3" y="325" width="30.3" height="15.0" fill="rgb(247,169,44)" rx="2" ry="2" />
+<text  x="406.33" y="335.5" >gi..</text>
+</g>
+<g >
+<title>runtime.wakep (1 samples, 2.56%)</title><rect x="282.3" y="453" width="30.3" height="15.0" fill="rgb(236,170,33)" rx="2" ry="2" />
+<text  x="285.31" y="463.5" >ru..</text>
+</g>
+<g >
+<title>io.Copy (1 samples, 2.56%)</title><rect x="312.6" y="517" width="30.2" height="15.0" fill="rgb(248,222,12)" rx="2" ry="2" />
+<text  x="315.56" y="527.5" >io..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Context).ShouldBindWith (1 samples, 2.56%)</title><rect x="403.3" y="309" width="30.3" height="15.0" fill="rgb(247,169,37)" rx="2" ry="2" />
+<text  x="406.33" y="319.5" >gi..</text>
+</g>
+<g >
+<title>net/http.(*conn).setState (1 samples, 2.56%)</title><rect x="282.3" y="597" width="30.3" height="15.0" fill="rgb(224,54,5)" rx="2" ry="2" />
+<text  x="285.31" y="607.5" >ne..</text>
+</g>
+<g >
+<title>reflect.typedmemmove (1 samples, 2.56%)</title><rect x="615.1" y="197" width="30.3" height="15.0" fill="rgb(217,117,37)" rx="2" ry="2" />
+<text  x="618.13" y="207.5" >re..</text>
+</g>
+<g >
+<title>runtime.gentraceback (2 samples, 5.13%)</title><rect x="857.2" y="485" width="60.5" height="15.0" fill="rgb(251,86,48)" rx="2" ry="2" />
+<text  x="860.18" y="495.5" >runtim..</text>
+</g>
+<g >
+<title>runtime.scanobject (2 samples, 5.13%)</title><rect x="947.9" y="549" width="60.6" height="15.0" fill="rgb(214,182,27)" rx="2" ry="2" />
+<text  x="950.95" y="559.5" >runtim..</text>
+</g>
+<g >
+<title>bufio.(*Reader).fill (3 samples, 7.69%)</title><rect x="131.0" y="565" width="90.8" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="134.03" y="575.5" >bufio.(*Re..</text>
+</g>
+<g >
+<title>net/http.(*conn).serve (23 samples, 58.97%)</title><rect x="100.8" y="613" width="695.9" height="15.0" fill="rgb(213,212,39)" rx="2" ry="2" />
+<text  x="103.77" y="623.5" >net/http.(*conn).serve</text>
+</g>
+<g >
+<title>net.(*Dialer).DialContext (3 samples, 7.69%)</title><rect x="524.4" y="213" width="90.7" height="15.0" fill="rgb(231,21,42)" rx="2" ry="2" />
+<text  x="527.36" y="223.5" >net.(*Dial..</text>
+</g>
+<g >
+<title>runtime.runqgrab (1 samples, 2.56%)</title><rect x="1069.0" y="533" width="30.2" height="15.0" fill="rgb(233,59,36)" rx="2" ry="2" />
+<text  x="1071.97" y="543.5" >ru..</text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 2.56%)</title><rect x="191.5" y="373" width="30.3" height="15.0" fill="rgb(223,90,22)" rx="2" ry="2" />
+<text  x="194.54" y="383.5" >ru..</text>
+</g>
+<g >
+<title>runtime.adjustframe (1 samples, 2.56%)</title><rect x="705.9" y="373" width="30.3" height="15.0" fill="rgb(225,65,45)" rx="2" ry="2" />
+<text  x="708.90" y="383.5" >ru..</text>
+</g>
+<g >
+<title>bytes.(*Buffer).ReadFrom (2 samples, 5.13%)</title><rect x="645.4" y="389" width="60.5" height="15.0" fill="rgb(226,81,38)" rx="2" ry="2" />
+<text  x="648.38" y="399.5" >bytes...</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin/binding.decodeJSON (1 samples, 2.56%)</title><rect x="403.3" y="277" width="30.3" height="15.0" fill="rgb(229,96,41)" rx="2" ry="2" />
+<text  x="406.33" y="287.5" >gi..</text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 2.56%)</title><rect x="191.5" y="357" width="30.3" height="15.0" fill="rgb(250,139,25)" rx="2" ry="2" />
+<text  x="194.54" y="367.5" >ru..</text>
+</g>
+<g >
+<title>net.(*conn).Read (3 samples, 7.69%)</title><rect x="131.0" y="533" width="90.8" height="15.0" fill="rgb(247,133,54)" rx="2" ry="2" />
+<text  x="134.03" y="543.5" >net.(*conn..</text>
+</g>
+<g >
+<title>runtime.send (1 samples, 2.56%)</title><rect x="282.3" y="533" width="30.3" height="15.0" fill="rgb(221,9,31)" rx="2" ry="2" />
+<text  x="285.31" y="543.5" >ru..</text>
+</g>
+<g >
+<title>net/textproto.(*Reader).readLineSlice (1 samples, 2.56%)</title><rect x="221.8" y="549" width="30.3" height="15.0" fill="rgb(222,162,37)" rx="2" ry="2" />
+<text  x="224.79" y="559.5" >ne..</text>
+</g>
+<g >
+<title>bufio.(*Reader).ReadLine (1 samples, 2.56%)</title><rect x="221.8" y="533" width="30.3" height="15.0" fill="rgb(206,142,37)" rx="2" ry="2" />
+<text  x="224.79" y="543.5" >bu..</text>
+</g>
+<g >
+<title>go.uber.org/zap/zapcore.(*jsonEncoder).encodeReflected (1 samples, 2.56%)</title><rect x="615.1" y="309" width="30.3" height="15.0" fill="rgb(244,78,14)" rx="2" ry="2" />
+<text  x="618.13" y="319.5" >go..</text>
+</g>
+<g >
+<title>go-ws/middlewares.ResponseHandler.func1 (8 samples, 20.51%)</title><rect x="373.1" y="405" width="242.0" height="15.0" fill="rgb(243,92,31)" rx="2" ry="2" />
+<text  x="376.08" y="415.5" >go-ws/middlewares.ResponseHandle..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Context).Next (8 samples, 20.51%)</title><rect x="373.1" y="357" width="242.0" height="15.0" fill="rgb(250,32,45)" rx="2" ry="2" />
+<text  x="376.08" y="367.5" >github.com/gin-gonic/gin.(*Conte..</text>
+</g>
+<g >
+<title>net/http.(*Server).Serve (1 samples, 2.56%)</title><rect x="70.5" y="597" width="30.3" height="15.0" fill="rgb(211,143,18)" rx="2" ry="2" />
+<text  x="73.51" y="607.5" >ne..</text>
+</g>
+<g >
+<title>runtime.copystack (1 samples, 2.56%)</title><rect x="705.9" y="405" width="30.3" height="15.0" fill="rgb(234,163,27)" rx="2" ry="2" />
+<text  x="708.90" y="415.5" >ru..</text>
+</g>
+<g >
+<title>github.com/facebookgo/httpdown.(*server).connState (1 samples, 2.56%)</title><rect x="282.3" y="581" width="30.3" height="15.0" fill="rgb(245,45,7)" rx="2" ry="2" />
+<text  x="285.31" y="591.5" >gi..</text>
+</g>
+<g >
+<title>internal/poll.(*FD).SetReadDeadline (1 samples, 2.56%)</title><rect x="342.8" y="533" width="30.3" height="15.0" fill="rgb(252,169,7)" rx="2" ry="2" />
+<text  x="345.82" y="543.5" >in..</text>
+</g>
+<g >
+<title>reflect.Value.Interface (1 samples, 2.56%)</title><rect x="403.3" y="133" width="30.3" height="15.0" fill="rgb(224,10,1)" rx="2" ry="2" />
+<text  x="406.33" y="143.5" >re..</text>
+</g>
+<g >
+<title>github.com/gomodule/redigo/redis.(*conn).DoWithTimeout (2 samples, 5.13%)</title><rect x="463.8" y="213" width="60.6" height="15.0" fill="rgb(217,192,35)" rx="2" ry="2" />
+<text  x="466.85" y="223.5" >github..</text>
+</g>
+<g >
+<title>runtime.markrootSpans (1 samples, 2.56%)</title><rect x="917.7" y="533" width="30.2" height="15.0" fill="rgb(249,45,37)" rx="2" ry="2" />
+<text  x="920.69" y="543.5" >ru..</text>
+</g>
+<g >
+<title>github.com/go-playground/validator/v10.(*Validate).Struct (1 samples, 2.56%)</title><rect x="403.3" y="229" width="30.3" height="15.0" fill="rgb(209,80,19)" rx="2" ry="2" />
+<text  x="406.33" y="239.5" >gi..</text>
+</g>
+<g >
+<title>runtime.step (1 samples, 2.56%)</title><rect x="887.4" y="389" width="30.3" height="15.0" fill="rgb(234,198,53)" rx="2" ry="2" />
+<text  x="890.44" y="399.5" >ru..</text>
+</g>
+<g >
+<title>runtime.funcspdelta (1 samples, 2.56%)</title><rect x="857.2" y="469" width="30.2" height="15.0" fill="rgb(228,105,6)" rx="2" ry="2" />
+<text  x="860.18" y="479.5" >ru..</text>
+</g>
+<g >
+<title>runtime.pageIndexOf (1 samples, 2.56%)</title><rect x="917.7" y="485" width="30.2" height="15.0" fill="rgb(210,60,15)" rx="2" ry="2" />
+<text  x="920.69" y="495.5" >ru..</text>
+</g>
+<g >
+<title>net/http.(*connReader).backgroundRead (1 samples, 2.56%)</title><rect x="796.7" y="613" width="30.2" height="15.0" fill="rgb(237,29,38)" rx="2" ry="2" />
+<text  x="799.67" y="623.5" >ne..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Context).Next (12 samples, 30.77%)</title><rect x="373.1" y="485" width="363.1" height="15.0" fill="rgb(246,38,52)" rx="2" ry="2" />
+<text  x="376.08" y="495.5" >github.com/gin-gonic/gin.(*Context).Next</text>
+</g>
+<g >
+<title>fmt.Sprintf (1 samples, 2.56%)</title><rect x="373.1" y="325" width="30.2" height="15.0" fill="rgb(240,120,31)" rx="2" ry="2" />
+<text  x="376.08" y="335.5" >fm..</text>
+</g>
+<g >
+<title>runtime.mcall (4 samples, 10.26%)</title><rect x="1008.5" y="613" width="121.0" height="15.0" fill="rgb(237,216,48)" rx="2" ry="2" />
+<text  x="1011.46" y="623.5" >runtime.mcall</text>
+</g>
+<g >
+<title>runtime.park_m (4 samples, 10.26%)</title><rect x="1008.5" y="597" width="121.0" height="15.0" fill="rgb(251,203,0)" rx="2" ry="2" />
+<text  x="1011.46" y="607.5" >runtime.park_m</text>
+</g>
+<g >
+<title>bufio.(*Reader).fill (1 samples, 2.56%)</title><rect x="221.8" y="501" width="30.3" height="15.0" fill="rgb(243,84,1)" rx="2" ry="2" />
+<text  x="224.79" y="511.5" >bu..</text>
+</g>
+<g >
+<title>syscall.Syscall (1 samples, 2.56%)</title><rect x="221.8" y="389" width="30.3" height="15.0" fill="rgb(249,190,8)" rx="2" ry="2" />
+<text  x="224.79" y="399.5" >sy..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.LoggerWithConfig.func1 (13 samples, 33.33%)</title><rect x="373.1" y="533" width="393.3" height="15.0" fill="rgb(220,217,53)" rx="2" ry="2" />
+<text  x="376.08" y="543.5" >github.com/gin-gonic/gin.LoggerWithConfig.func1</text>
+</g>
+<g >
+<title>io.CopyN (1 samples, 2.56%)</title><rect x="312.6" y="533" width="30.2" height="15.0" fill="rgb(224,152,14)" rx="2" ry="2" />
+<text  x="315.56" y="543.5" >io..</text>
+</g>
+<g >
+<title>runtime.ifaceeq (1 samples, 2.56%)</title><rect x="312.6" y="469" width="30.2" height="15.0" fill="rgb(212,148,36)" rx="2" ry="2" />
+<text  x="315.56" y="479.5" >ru..</text>
+</g>
+<g >
+<title>github.com/gomodule/redigo/redis.(*conn).Do (2 samples, 5.13%)</title><rect x="463.8" y="229" width="60.6" height="15.0" fill="rgb(235,194,12)" rx="2" ry="2" />
+<text  x="466.85" y="239.5" >github..</text>
+</g>
+<g >
+<title>runtime.scanobject (1 samples, 2.56%)</title><rect x="917.7" y="517" width="30.2" height="15.0" fill="rgb(227,106,44)" rx="2" ry="2" />
+<text  x="920.69" y="527.5" >ru..</text>
+</g>
+<g >
+<title>net/textproto.(*Reader).ReadLine (1 samples, 2.56%)</title><rect x="221.8" y="565" width="30.3" height="15.0" fill="rgb(226,49,47)" rx="2" ry="2" />
+<text  x="224.79" y="575.5" >ne..</text>
+</g>
+<g >
+<title>go-ws/databases/redis.NewRedisClient.func1 (5 samples, 12.82%)</title><rect x="463.8" y="261" width="151.3" height="15.0" fill="rgb(224,126,24)" rx="2" ry="2" />
+<text  x="466.85" y="271.5" >go-ws/databases/red..</text>
+</g>
+<g >
+<title>runtime.step (1 samples, 2.56%)</title><rect x="705.9" y="309" width="30.3" height="15.0" fill="rgb(245,64,23)" rx="2" ry="2" />
+<text  x="708.90" y="319.5" >ru..</text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 2.56%)</title><rect x="191.5" y="341" width="30.3" height="15.0" fill="rgb(252,3,36)" rx="2" ry="2" />
+<text  x="194.54" y="351.5" >ru..</text>
+</g>
+<g >
+<title>net/http.(*connReader).Read (1 samples, 2.56%)</title><rect x="221.8" y="485" width="30.3" height="15.0" fill="rgb(225,14,5)" rx="2" ry="2" />
+<text  x="224.79" y="495.5" >ne..</text>
+</g>
+<g >
+<title>github.com/gomodule/redigo/redis.(*Pool).dial (5 samples, 12.82%)</title><rect x="463.8" y="277" width="151.3" height="15.0" fill="rgb(222,77,38)" rx="2" ry="2" />
+<text  x="466.85" y="287.5" >github.com/gomodule..</text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 2.56%)</title><rect x="675.6" y="309" width="30.3" height="15.0" fill="rgb(246,45,0)" rx="2" ry="2" />
+<text  x="678.64" y="319.5" >ru..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Context).Next (12 samples, 30.77%)</title><rect x="373.1" y="517" width="363.1" height="15.0" fill="rgb(220,100,52)" rx="2" ry="2" />
+<text  x="376.08" y="527.5" >github.com/gin-gonic/gin.(*Context).Next</text>
+</g>
+<g >
+<title>encoding/json.(*encodeState).reflectValue (1 samples, 2.56%)</title><rect x="615.1" y="261" width="30.3" height="15.0" fill="rgb(225,163,15)" rx="2" ry="2" />
+<text  x="618.13" y="271.5" >en..</text>
+</g>
+<g >
+<title>net.(*netFD).Close (1 samples, 2.56%)</title><rect x="1129.5" y="597" width="30.2" height="15.0" fill="rgb(216,46,14)" rx="2" ry="2" />
+<text  x="1132.49" y="607.5" >ne..</text>
+</g>
+<g >
+<title>runtime.mapdelete (1 samples, 2.56%)</title><rect x="100.8" y="549" width="30.2" height="15.0" fill="rgb(233,175,32)" rx="2" ry="2" />
+<text  x="103.77" y="559.5" >ru..</text>
+</g>
+<g >
+<title>syscall.Syscall (1 samples, 2.56%)</title><rect x="1129.5" y="517" width="30.2" height="15.0" fill="rgb(231,220,28)" rx="2" ry="2" />
+<text  x="1132.49" y="527.5" >sy..</text>
+</g>
+<g >
+<title>all (39 samples, 100%)</title><rect x="10.0" y="629" width="1180.0" height="15.0" fill="rgb(245,51,5)" rx="2" ry="2" />
+<text  x="13.00" y="639.5" ></text>
+</g>
+<g >
+<title>io/ioutil.devNull.ReadFrom (1 samples, 2.56%)</title><rect x="312.6" y="485" width="30.2" height="15.0" fill="rgb(236,204,20)" rx="2" ry="2" />
+<text  x="315.56" y="495.5" >io..</text>
+</g>
+<g >
+<title>runtime.arenaIndex (1 samples, 2.56%)</title><rect x="917.7" y="469" width="30.2" height="15.0" fill="rgb(227,212,46)" rx="2" ry="2" />
+<text  x="920.69" y="479.5" >ru..</text>
+</g>
+<g >
+<title>runtime.pcdatavalue (1 samples, 2.56%)</title><rect x="705.9" y="341" width="30.3" height="15.0" fill="rgb(234,151,24)" rx="2" ry="2" />
+<text  x="708.90" y="351.5" >ru..</text>
+</g>
+<g >
+<title>runtime.runqput (1 samples, 2.56%)</title><rect x="675.6" y="261" width="30.3" height="15.0" fill="rgb(205,186,20)" rx="2" ry="2" />
+<text  x="678.64" y="271.5" >ru..</text>
+</g>
+<g >
+<title>runtime.findrunnable (4 samples, 10.26%)</title><rect x="1008.5" y="565" width="121.0" height="15.0" fill="rgb(223,216,2)" rx="2" ry="2" />
+<text  x="1011.46" y="575.5" >runtime.findrun..</text>
+</g>
+<g >
+<title>runtime.getStackMap (1 samples, 2.56%)</title><rect x="705.9" y="357" width="30.3" height="15.0" fill="rgb(232,19,47)" rx="2" ry="2" />
+<text  x="708.90" y="367.5" >ru..</text>
+</g>
+<g >
+<title>net.(*conn).Read (1 samples, 2.56%)</title><rect x="796.7" y="597" width="30.2" height="15.0" fill="rgb(245,226,9)" rx="2" ry="2" />
+<text  x="799.67" y="607.5" >ne..</text>
+</g>
+<g >
+<title>runtime.usleep (1 samples, 2.56%)</title><rect x="1069.0" y="517" width="30.2" height="15.0" fill="rgb(239,169,14)" rx="2" ry="2" />
+<text  x="1071.97" y="527.5" >ru..</text>
+</g>
+<g >
+<title>runtime.memclrHasPointers (1 samples, 2.56%)</title><rect x="100.8" y="533" width="30.2" height="15.0" fill="rgb(222,94,13)" rx="2" ry="2" />
+<text  x="103.77" y="543.5" >ru..</text>
+</g>
+<g >
+<title>syscall.Read (1 samples, 2.56%)</title><rect x="796.7" y="549" width="30.2" height="15.0" fill="rgb(217,83,7)" rx="2" ry="2" />
+<text  x="799.67" y="559.5" >sy..</text>
+</g>
+<g >
+<title>net/http.(*conn).readRequest (5 samples, 12.82%)</title><rect x="131.0" y="597" width="151.3" height="15.0" fill="rgb(208,56,44)" rx="2" ry="2" />
+<text  x="134.03" y="607.5" >net/http.(*conn).re..</text>
+</g>
+<g >
+<title>net.(*netFD).dial (2 samples, 5.13%)</title><rect x="554.6" y="101" width="60.5" height="15.0" fill="rgb(211,188,14)" rx="2" ry="2" />
+<text  x="557.62" y="111.5" >net.(*..</text>
+</g>
+<g >
+<title>runtime.greyobject (1 samples, 2.56%)</title><rect x="917.7" y="501" width="30.2" height="15.0" fill="rgb(214,88,1)" rx="2" ry="2" />
+<text  x="920.69" y="511.5" >ru..</text>
+</g>
+<g >
+<title>runtime.gcDrain (5 samples, 12.82%)</title><rect x="857.2" y="565" width="151.3" height="15.0" fill="rgb(241,44,8)" rx="2" ry="2" />
+<text  x="860.18" y="575.5" >runtime.gcDrain</text>
+</g>
+<g >
+<title>github.com/go-playground/validator/v10.(*validate).validateStruct (1 samples, 2.56%)</title><rect x="403.3" y="197" width="30.3" height="15.0" fill="rgb(208,135,15)" rx="2" ry="2" />
+<text  x="406.33" y="207.5" >gi..</text>
+</g>
+<g >
+<title>runtime.step (1 samples, 2.56%)</title><rect x="857.2" y="437" width="30.2" height="15.0" fill="rgb(238,215,27)" rx="2" ry="2" />
+<text  x="860.18" y="447.5" >ru..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin/binding.(*defaultValidator).ValidateStruct (1 samples, 2.56%)</title><rect x="403.3" y="245" width="30.3" height="15.0" fill="rgb(222,229,23)" rx="2" ry="2" />
+<text  x="406.33" y="255.5" >gi..</text>
+</g>
+<g >
+<title>runtime.gcBgMarkWorker (5 samples, 12.82%)</title><rect x="857.2" y="613" width="151.3" height="15.0" fill="rgb(217,17,49)" rx="2" ry="2" />
+<text  x="860.18" y="623.5" >runtime.gcBgMarkWor..</text>
+</g>
+<g >
+<title>runtime.schedule (4 samples, 10.26%)</title><rect x="1008.5" y="581" width="121.0" height="15.0" fill="rgb(231,142,6)" rx="2" ry="2" />
+<text  x="1011.46" y="591.5" >runtime.schedule</text>
+</g>
+<g >
+<title>runtime.pcvalue (1 samples, 2.56%)</title><rect x="705.9" y="325" width="30.3" height="15.0" fill="rgb(215,39,52)" rx="2" ry="2" />
+<text  x="708.90" y="335.5" >ru..</text>
+</g>
+<g >
+<title>reflect.copyVal (1 samples, 2.56%)</title><rect x="615.1" y="213" width="30.3" height="15.0" fill="rgb(240,36,36)" rx="2" ry="2" />
+<text  x="618.13" y="223.5" >re..</text>
+</g>
+<g >
+<title>internal/poll.runtime_pollSetDeadline (1 samples, 2.56%)</title><rect x="342.8" y="501" width="30.3" height="15.0" fill="rgb(215,32,5)" rx="2" ry="2" />
+<text  x="345.82" y="511.5" >in..</text>
+</g>
+<g >
+<title>net.socket (2 samples, 5.13%)</title><rect x="554.6" y="117" width="60.5" height="15.0" fill="rgb(215,5,11)" rx="2" ry="2" />
+<text  x="557.62" y="127.5" >net.so..</text>
+</g>
+<g >
+<title>context.(*cancelCtx).cancel (1 samples, 2.56%)</title><rect x="100.8" y="581" width="30.2" height="15.0" fill="rgb(215,5,38)" rx="2" ry="2" />
+<text  x="103.77" y="591.5" >co..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin/binding.jsonBinding.Bind (1 samples, 2.56%)</title><rect x="403.3" y="293" width="30.3" height="15.0" fill="rgb(224,60,23)" rx="2" ry="2" />
+<text  x="406.33" y="303.5" >gi..</text>
+</g>
+<g >
+<title>github.com/go-playground/validator/v10.wrapFunc.func1 (1 samples, 2.56%)</title><rect x="403.3" y="165" width="30.3" height="15.0" fill="rgb(221,91,35)" rx="2" ry="2" />
+<text  x="406.33" y="175.5" >gi..</text>
+</g>
+<g >
+<title>runtime.reentersyscall (1 samples, 2.56%)</title><rect x="191.5" y="421" width="30.3" height="15.0" fill="rgb(234,215,18)" rx="2" ry="2" />
+<text  x="194.54" y="431.5" >ru..</text>
+</g>
+<g >
+<title>context.WithCancel.func1 (1 samples, 2.56%)</title><rect x="100.8" y="597" width="30.2" height="15.0" fill="rgb(215,82,50)" rx="2" ry="2" />
+<text  x="103.77" y="607.5" >co..</text>
+</g>
+<g >
+<title>runtime.newproc (2 samples, 5.13%)</title><rect x="645.4" y="325" width="60.5" height="15.0" fill="rgb(245,216,3)" rx="2" ry="2" />
+<text  x="648.38" y="335.5" >runtim..</text>
+</g>
+<g >
+<title>go.uber.org/zap/zapcore.addFields (1 samples, 2.56%)</title><rect x="615.1" y="357" width="30.3" height="15.0" fill="rgb(205,44,11)" rx="2" ry="2" />
+<text  x="618.13" y="367.5" >go..</text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 2.56%)</title><rect x="826.9" y="597" width="30.3" height="15.0" fill="rgb(243,46,30)" rx="2" ry="2" />
+<text  x="829.92" y="607.5" >ru..</text>
+</g>
+<g >
+<title>go-ws/middlewares.RequestLogger.func1 (12 samples, 30.77%)</title><rect x="373.1" y="437" width="363.1" height="15.0" fill="rgb(227,73,53)" rx="2" ry="2" />
+<text  x="376.08" y="447.5" >go-ws/middlewares.RequestLogger.func1</text>
+</g>
+<g >
+<title>runtime.scanstack.func1 (1 samples, 2.56%)</title><rect x="887.4" y="469" width="30.3" height="15.0" fill="rgb(242,97,33)" rx="2" ry="2" />
+<text  x="890.44" y="479.5" >ru..</text>
+</g>
+<g >
+<title>runtime.chansend (1 samples, 2.56%)</title><rect x="282.3" y="549" width="30.3" height="15.0" fill="rgb(206,213,53)" rx="2" ry="2" />
+<text  x="285.31" y="559.5" >ru..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin/binding.validate (1 samples, 2.56%)</title><rect x="403.3" y="261" width="30.3" height="15.0" fill="rgb(249,62,36)" rx="2" ry="2" />
+<text  x="406.33" y="271.5" >gi..</text>
+</g>
+<g >
+<title>github.com/google/uuid.NewRandom (1 samples, 2.56%)</title><rect x="433.6" y="309" width="30.2" height="15.0" fill="rgb(251,48,35)" rx="2" ry="2" />
+<text  x="436.59" y="319.5" >gi..</text>
+</g>
+<g >
+<title>net/http.(*chunkWriter).writeHeader (1 samples, 2.56%)</title><rect x="312.6" y="549" width="30.2" height="15.0" fill="rgb(248,151,24)" rx="2" ry="2" />
+<text  x="315.56" y="559.5" >ne..</text>
+</g>
+<g >
+<title>fmt.newPrinter (1 samples, 2.56%)</title><rect x="373.1" y="309" width="30.2" height="15.0" fill="rgb(250,164,52)" rx="2" ry="2" />
+<text  x="376.08" y="319.5" >fm..</text>
+</g>
+<g >
+<title>runtime.runqsteal (1 samples, 2.56%)</title><rect x="1069.0" y="549" width="30.2" height="15.0" fill="rgb(251,91,30)" rx="2" ry="2" />
+<text  x="1071.97" y="559.5" >ru..</text>
+</g>
+<g >
+<title>runtime.goready.func1 (1 samples, 2.56%)</title><rect x="282.3" y="485" width="30.3" height="15.0" fill="rgb(227,149,39)" rx="2" ry="2" />
+<text  x="285.31" y="495.5" >ru..</text>
+</g>
+<g >
+<title>runtime.gentraceback (1 samples, 2.56%)</title><rect x="705.9" y="389" width="30.3" height="15.0" fill="rgb(250,18,18)" rx="2" ry="2" />
+<text  x="708.90" y="399.5" >ru..</text>
+</g>
+<g >
+<title>net.(*netFD).Read (1 samples, 2.56%)</title><rect x="221.8" y="453" width="30.3" height="15.0" fill="rgb(253,148,24)" rx="2" ry="2" />
+<text  x="224.79" y="463.5" >ne..</text>
+</g>
+<g >
+<title>syscall.Syscall (1 samples, 2.56%)</title><rect x="796.7" y="517" width="30.2" height="15.0" fill="rgb(211,50,11)" rx="2" ry="2" />
+<text  x="799.67" y="527.5" >sy..</text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 2.56%)</title><rect x="282.3" y="389" width="30.3" height="15.0" fill="rgb(243,17,29)" rx="2" ry="2" />
+<text  x="285.31" y="399.5" >ru..</text>
+</g>
+<g >
+<title>runtime.entersyscall (1 samples, 2.56%)</title><rect x="191.5" y="437" width="30.3" height="15.0" fill="rgb(207,133,4)" rx="2" ry="2" />
+<text  x="194.54" y="447.5" >ru..</text>
+</g>
+<g >
+<title>internal/poll.setDeadlineImpl (1 samples, 2.56%)</title><rect x="342.8" y="517" width="30.3" height="15.0" fill="rgb(243,221,34)" rx="2" ry="2" />
+<text  x="345.82" y="527.5" >in..</text>
+</g>
+<g >
+<title>net.(*sysDialer).dialSingle (2 samples, 5.13%)</title><rect x="554.6" y="181" width="60.5" height="15.0" fill="rgb(211,222,34)" rx="2" ry="2" />
+<text  x="557.62" y="191.5" >net.(*..</text>
+</g>
+<g >
+<title>go.uber.org/zap/zapcore.(*CheckedEntry).Write (1 samples, 2.56%)</title><rect x="615.1" y="405" width="30.3" height="15.0" fill="rgb(251,142,24)" rx="2" ry="2" />
+<text  x="618.13" y="415.5" >go..</text>
+</g>
+<g >
+<title>runtime.netpoll (1 samples, 2.56%)</title><rect x="1038.7" y="549" width="30.3" height="15.0" fill="rgb(251,97,42)" rx="2" ry="2" />
+<text  x="1041.72" y="559.5" >ru..</text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 2.56%)</title><rect x="100.8" y="517" width="30.2" height="15.0" fill="rgb(215,169,11)" rx="2" ry="2" />
+<text  x="103.77" y="527.5" >ru..</text>
+</g>
+<g >
+<title>internal/poll.(*FD).destroy (1 samples, 2.56%)</title><rect x="1129.5" y="549" width="30.2" height="15.0" fill="rgb(224,10,3)" rx="2" ry="2" />
+<text  x="1132.49" y="559.5" >in..</text>
+</g>
+<g >
+<title>github.com/gomodule/redigo/redis.(*Pool).get (5 samples, 12.82%)</title><rect x="463.8" y="293" width="151.3" height="15.0" fill="rgb(230,76,50)" rx="2" ry="2" />
+<text  x="466.85" y="303.5" >github.com/gomodule..</text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 2.56%)</title><rect x="282.3" y="501" width="30.3" height="15.0" fill="rgb(208,188,17)" rx="2" ry="2" />
+<text  x="285.31" y="511.5" >ru..</text>
+</g>
+<g >
+<title>net.(*netFD).Read (1 samples, 2.56%)</title><rect x="796.7" y="581" width="30.2" height="15.0" fill="rgb(239,34,48)" rx="2" ry="2" />
+<text  x="799.67" y="591.5" >ne..</text>
+</g>
+<g >
+<title>runtime.pcvalue (1 samples, 2.56%)</title><rect x="857.2" y="453" width="30.2" height="15.0" fill="rgb(239,180,3)" rx="2" ry="2" />
+<text  x="860.18" y="463.5" >ru..</text>
+</g>
+<g >
+<title>bufio.(*Writer).Flush (2 samples, 5.13%)</title><rect x="463.8" y="197" width="60.6" height="15.0" fill="rgb(226,21,8)" rx="2" ry="2" />
+<text  x="466.85" y="207.5" >bufio...</text>
+</g>
+<g >
+<title>go.uber.org/zap.(*Logger).Info (1 samples, 2.56%)</title><rect x="615.1" y="421" width="30.3" height="15.0" fill="rgb(242,84,3)" rx="2" ry="2" />
+<text  x="618.13" y="431.5" >go..</text>
+</g>
+<g >
+<title>bufio.(*Writer).Flush (1 samples, 2.56%)</title><rect x="312.6" y="581" width="30.2" height="15.0" fill="rgb(215,46,40)" rx="2" ry="2" />
+<text  x="315.56" y="591.5" >bu..</text>
+</g>
+<g >
+<title>syscall.read (3 samples, 7.69%)</title><rect x="131.0" y="469" width="90.8" height="15.0" fill="rgb(241,128,36)" rx="2" ry="2" />
+<text  x="134.03" y="479.5" >syscall.read</text>
+</g>
+<g >
+<title>reflect.packEface (1 samples, 2.56%)</title><rect x="403.3" y="101" width="30.3" height="15.0" fill="rgb(207,227,16)" rx="2" ry="2" />
+<text  x="406.33" y="111.5" >re..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.glob..func1 (1 samples, 2.56%)</title><rect x="736.2" y="517" width="30.2" height="15.0" fill="rgb(242,149,41)" rx="2" ry="2" />
+<text  x="739.15" y="527.5" >gi..</text>
+</g>
+<g >
+<title>crypto/rand.batched.func1 (1 samples, 2.56%)</title><rect x="433.6" y="245" width="30.2" height="15.0" fill="rgb(225,118,7)" rx="2" ry="2" />
+<text  x="436.59" y="255.5" >cr..</text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 2.56%)</title><rect x="282.3" y="405" width="30.3" height="15.0" fill="rgb(208,167,7)" rx="2" ry="2" />
+<text  x="285.31" y="415.5" >ru..</text>
+</g>
+<g >
+<title>runtime.stopm (1 samples, 2.56%)</title><rect x="1099.2" y="549" width="30.3" height="15.0" fill="rgb(236,48,28)" rx="2" ry="2" />
+<text  x="1102.23" y="559.5" >ru..</text>
+</g>
+<g >
+<title>net/http.(*connReader).startBackgroundRead (2 samples, 5.13%)</title><rect x="645.4" y="341" width="60.5" height="15.0" fill="rgb(243,204,14)" rx="2" ry="2" />
+<text  x="648.38" y="351.5" >net/ht..</text>
+</g>
+<g >
+<title>net/http.(*chunkWriter).Write (1 samples, 2.56%)</title><rect x="312.6" y="565" width="30.2" height="15.0" fill="rgb(218,170,47)" rx="2" ry="2" />
+<text  x="315.56" y="575.5" >ne..</text>
+</g>
+<g >
+<title>runtime.markroot (3 samples, 7.69%)</title><rect x="857.2" y="549" width="90.7" height="15.0" fill="rgb(213,220,27)" rx="2" ry="2" />
+<text  x="860.18" y="559.5" >runtime.ma..</text>
+</g>
+<g >
+<title>net/http.readRequest (2 samples, 5.13%)</title><rect x="221.8" y="581" width="60.5" height="15.0" fill="rgb(225,100,33)" rx="2" ry="2" />
+<text  x="224.79" y="591.5" >net/ht..</text>
+</g>
+<g >
+<title>encoding/json.(*encodeState).marshal (1 samples, 2.56%)</title><rect x="615.1" y="277" width="30.3" height="15.0" fill="rgb(207,41,52)" rx="2" ry="2" />
+<text  x="618.13" y="287.5" >en..</text>
+</g>
+<g >
+<title>net.(*TCPListener).accept (1 samples, 2.56%)</title><rect x="70.5" y="565" width="30.3" height="15.0" fill="rgb(242,64,42)" rx="2" ry="2" />
+<text  x="73.51" y="575.5" >ne..</text>
+</g>
+<g >
+<title>github.com/go-playground/validator/v10.(*Validate).StructCtx (1 samples, 2.56%)</title><rect x="403.3" y="213" width="30.3" height="15.0" fill="rgb(249,155,35)" rx="2" ry="2" />
+<text  x="406.33" y="223.5" >gi..</text>
+</g>
+<g >
+<title>context.removeChild (1 samples, 2.56%)</title><rect x="100.8" y="565" width="30.2" height="15.0" fill="rgb(251,103,4)" rx="2" ry="2" />
+<text  x="103.77" y="575.5" >co..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Context).Next (8 samples, 20.51%)</title><rect x="373.1" y="421" width="242.0" height="15.0" fill="rgb(245,182,25)" rx="2" ry="2" />
+<text  x="376.08" y="431.5" >github.com/gin-gonic/gin.(*Conte..</text>
+</g>
+<g >
+<title>net.(*sysDialer).doDialTCP (2 samples, 5.13%)</title><rect x="554.6" y="149" width="60.5" height="15.0" fill="rgb(252,27,20)" rx="2" ry="2" />
+<text  x="557.62" y="159.5" >net.(*..</text>
+</g>
+<g >
+<title>net.(*sysDialer).dialSerial (2 samples, 5.13%)</title><rect x="554.6" y="197" width="60.5" height="15.0" fill="rgb(234,146,13)" rx="2" ry="2" />
+<text  x="557.62" y="207.5" >net.(*..</text>
+</g>
+<g >
+<title>internal/poll.(*FD).Read (3 samples, 7.69%)</title><rect x="131.0" y="501" width="90.8" height="15.0" fill="rgb(219,36,36)" rx="2" ry="2" />
+<text  x="134.03" y="511.5" >internal/p..</text>
+</g>
+<g >
+<title>runtime.newproc.func1 (1 samples, 2.56%)</title><rect x="675.6" y="293" width="30.3" height="15.0" fill="rgb(254,175,0)" rx="2" ry="2" />
+<text  x="678.64" y="303.5" >ru..</text>
+</g>
+<g >
+<title>go.uber.org/zap/zapcore.(*jsonEncoder).EncodeEntry (1 samples, 2.56%)</title><rect x="615.1" y="373" width="30.3" height="15.0" fill="rgb(229,193,44)" rx="2" ry="2" />
+<text  x="618.13" y="383.5" >go..</text>
+</g>
+<g >
+<title>io.ReadFull (1 samples, 2.56%)</title><rect x="433.6" y="293" width="30.2" height="15.0" fill="rgb(243,156,50)" rx="2" ry="2" />
+<text  x="436.59" y="303.5" >io..</text>
+</g>
+<g >
+<title>runtime.goready (1 samples, 2.56%)</title><rect x="282.3" y="517" width="30.3" height="15.0" fill="rgb(238,126,52)" rx="2" ry="2" />
+<text  x="285.31" y="527.5" >ru..</text>
+</g>
+<g >
+<title>runtime.newstack (1 samples, 2.56%)</title><rect x="705.9" y="421" width="30.3" height="15.0" fill="rgb(221,33,45)" rx="2" ry="2" />
+<text  x="708.90" y="431.5" >ru..</text>
+</g>
+<g >
+<title>syscall.Write (2 samples, 5.13%)</title><rect x="463.8" y="133" width="60.6" height="15.0" fill="rgb(238,197,44)" rx="2" ry="2" />
+<text  x="466.85" y="143.5" >syscal..</text>
+</g>
+<g >
+<title>net/http.(*connReader).Read (3 samples, 7.69%)</title><rect x="131.0" y="549" width="90.8" height="15.0" fill="rgb(251,184,34)" rx="2" ry="2" />
+<text  x="134.03" y="559.5" >net/http.(..</text>
+</g>
+<g >
+<title>runtime.newproc1 (1 samples, 2.56%)</title><rect x="675.6" y="277" width="30.3" height="15.0" fill="rgb(223,3,2)" rx="2" ry="2" />
+<text  x="678.64" y="287.5" >ru..</text>
+</g>
+<g >
+<title>syscall.Syscall (2 samples, 5.13%)</title><rect x="463.8" y="101" width="60.6" height="15.0" fill="rgb(223,225,38)" rx="2" ry="2" />
+<text  x="466.85" y="111.5" >syscal..</text>
+</g>
+<g >
+<title>go.uber.org/zap/zapcore.(*ioCore).Write (1 samples, 2.56%)</title><rect x="615.1" y="389" width="30.3" height="15.0" fill="rgb(243,78,17)" rx="2" ry="2" />
+<text  x="618.13" y="399.5" >go..</text>
+</g>
+<g >
+<title>github.com/google/uuid.New (1 samples, 2.56%)</title><rect x="433.6" y="325" width="30.2" height="15.0" fill="rgb(216,17,22)" rx="2" ry="2" />
+<text  x="436.59" y="335.5" >gi..</text>
+</g>
+<g >
+<title>reflect.Value.MapKeys (1 samples, 2.56%)</title><rect x="615.1" y="229" width="30.3" height="15.0" fill="rgb(253,176,19)" rx="2" ry="2" />
+<text  x="618.13" y="239.5" >re..</text>
+</g>
+<g >
+<title>github.com/facebookgo/httpdown.(*server).manage (2 samples, 5.13%)</title><rect x="10.0" y="613" width="60.5" height="15.0" fill="rgb(220,148,15)" rx="2" ry="2" />
+<text  x="13.00" y="623.5" >github..</text>
+</g>
+<g >
+<title>runtime.spanOf (1 samples, 2.56%)</title><rect x="947.9" y="517" width="30.3" height="15.0" fill="rgb(241,129,53)" rx="2" ry="2" />
+<text  x="950.95" y="527.5" >ru..</text>
+</g>
+<g >
+<title>runtime.getStackMap (1 samples, 2.56%)</title><rect x="887.4" y="437" width="30.3" height="15.0" fill="rgb(215,19,7)" rx="2" ry="2" />
+<text  x="890.44" y="447.5" >ru..</text>
+</g>
+<g >
+<title>fmt.(*pp).doPrintf (1 samples, 2.56%)</title><rect x="736.2" y="485" width="30.2" height="15.0" fill="rgb(242,192,48)" rx="2" ry="2" />
+<text  x="739.15" y="495.5" >fm..</text>
+</g>
+<g >
+<title>io/ioutil.readAll (2 samples, 5.13%)</title><rect x="645.4" y="405" width="60.5" height="15.0" fill="rgb(241,6,15)" rx="2" ry="2" />
+<text  x="648.38" y="415.5" >io/iou..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Engine).handleHTTPRequest (14 samples, 35.90%)</title><rect x="373.1" y="565" width="423.6" height="15.0" fill="rgb(207,107,15)" rx="2" ry="2" />
+<text  x="376.08" y="575.5" >github.com/gin-gonic/gin.(*Engine).handleHTTPRequest</text>
+</g>
+<g >
+<title>github.com/go-playground/validator/v10.hasValue (1 samples, 2.56%)</title><rect x="403.3" y="149" width="30.3" height="15.0" fill="rgb(208,196,23)" rx="2" ry="2" />
+<text  x="406.33" y="159.5" >gi..</text>
+</g>
+<g >
+<title>runtime.scang (2 samples, 5.13%)</title><rect x="857.2" y="517" width="60.5" height="15.0" fill="rgb(254,181,4)" rx="2" ry="2" />
+<text  x="860.18" y="527.5" >runtim..</text>
+</g>
+<g >
+<title>syscall.read (1 samples, 2.56%)</title><rect x="221.8" y="405" width="30.3" height="15.0" fill="rgb(214,130,12)" rx="2" ry="2" />
+<text  x="224.79" y="415.5" >sy..</text>
+</g>
+<g >
+<title>runtime.(*mcache).prepareForSweep (1 samples, 2.56%)</title><rect x="1008.5" y="533" width="30.2" height="15.0" fill="rgb(220,179,14)" rx="2" ry="2" />
+<text  x="1011.46" y="543.5" >ru..</text>
+</g>
+<g >
+<title>internal/poll.(*FD).Read (1 samples, 2.56%)</title><rect x="221.8" y="437" width="30.3" height="15.0" fill="rgb(211,204,51)" rx="2" ry="2" />
+<text  x="224.79" y="447.5" >in..</text>
+</g>
+<g >
+<title>net.(*conn).Write (2 samples, 5.13%)</title><rect x="463.8" y="181" width="60.6" height="15.0" fill="rgb(217,64,37)" rx="2" ry="2" />
+<text  x="466.85" y="191.5" >net.(*..</text>
+</g>
+<g >
+<title>syscall.Syscall (2 samples, 5.13%)</title><rect x="554.6" y="37" width="60.5" height="15.0" fill="rgb(233,4,21)" rx="2" ry="2" />
+<text  x="557.62" y="47.5" >syscal..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Context).Next (8 samples, 20.51%)</title><rect x="373.1" y="389" width="242.0" height="15.0" fill="rgb(248,205,41)" rx="2" ry="2" />
+<text  x="376.08" y="399.5" >github.com/gin-gonic/gin.(*Conte..</text>
+</g>
+<g >
+<title>runtime.startm (1 samples, 2.56%)</title><rect x="282.3" y="437" width="30.3" height="15.0" fill="rgb(242,142,46)" rx="2" ry="2" />
+<text  x="285.31" y="447.5" >ru..</text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 2.56%)</title><rect x="282.3" y="421" width="30.3" height="15.0" fill="rgb(226,121,31)" rx="2" ry="2" />
+<text  x="285.31" y="431.5" >ru..</text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 2.56%)</title><rect x="1099.2" y="501" width="30.3" height="15.0" fill="rgb(221,215,36)" rx="2" ry="2" />
+<text  x="1102.23" y="511.5" >ru..</text>
+</g>
+<g >
+<title>syscall.write (2 samples, 5.13%)</title><rect x="463.8" y="117" width="60.6" height="15.0" fill="rgb(226,171,25)" rx="2" ry="2" />
+<text  x="466.85" y="127.5" >syscal..</text>
+</g>
+<g >
+<title>net.(*netFD).accept (1 samples, 2.56%)</title><rect x="70.5" y="549" width="30.3" height="15.0" fill="rgb(230,58,37)" rx="2" ry="2" />
+<text  x="73.51" y="559.5" >ne..</text>
+</g>
+<g >
+<title>net/http.serverHandler.ServeHTTP (14 samples, 35.90%)</title><rect x="373.1" y="597" width="423.6" height="15.0" fill="rgb(232,137,10)" rx="2" ry="2" />
+<text  x="376.08" y="607.5" >net/http.serverHandler.ServeHTTP</text>
+</g>
+<g >
+<title>go.uber.org/zap/zapcore.(*jsonEncoder).AddReflected (1 samples, 2.56%)</title><rect x="615.1" y="325" width="30.3" height="15.0" fill="rgb(234,194,52)" rx="2" ry="2" />
+<text  x="618.13" y="335.5" >go..</text>
+</g>
+<g >
+<title>net/textproto.canonicalMIMEHeaderKey (1 samples, 2.56%)</title><rect x="252.1" y="549" width="30.2" height="15.0" fill="rgb(230,96,28)" rx="2" ry="2" />
+<text  x="255.05" y="559.5" >ne..</text>
+</g>
+<g >
+<title>syscall.Connect (2 samples, 5.13%)</title><rect x="554.6" y="69" width="60.5" height="15.0" fill="rgb(230,160,17)" rx="2" ry="2" />
+<text  x="557.62" y="79.5" >syscal..</text>
+</g>
+<g >
+<title>runtime._System (1 samples, 2.56%)</title><rect x="826.9" y="613" width="30.3" height="15.0" fill="rgb(239,101,49)" rx="2" ry="2" />
+<text  x="829.92" y="623.5" >ru..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.RecoveryWithWriter.func1 (12 samples, 30.77%)</title><rect x="373.1" y="501" width="363.1" height="15.0" fill="rgb(211,62,54)" rx="2" ry="2" />
+<text  x="376.08" y="511.5" >github.com/gin-gonic/gin.RecoveryWithWriter.func1</text>
+</g>
+<g >
+<title>reflect.valueInterface (1 samples, 2.56%)</title><rect x="403.3" y="117" width="30.3" height="15.0" fill="rgb(219,212,34)" rx="2" ry="2" />
+<text  x="406.33" y="127.5" >re..</text>
+</g>
+<g >
+<title>syscall.Close (1 samples, 2.56%)</title><rect x="1129.5" y="533" width="30.2" height="15.0" fill="rgb(243,65,45)" rx="2" ry="2" />
+<text  x="1132.49" y="543.5" >sy..</text>
+</g>
+<g >
+<title>github.com/facebookgo/httpdown.(*server).serve (1 samples, 2.56%)</title><rect x="70.5" y="613" width="30.3" height="15.0" fill="rgb(235,107,5)" rx="2" ry="2" />
+<text  x="73.51" y="623.5" >gi..</text>
+</g>
+<g >
+<title>syscall.Syscall (3 samples, 7.69%)</title><rect x="131.0" y="453" width="90.8" height="15.0" fill="rgb(251,16,9)" rx="2" ry="2" />
+<text  x="134.03" y="463.5" >syscall.Sy..</text>
+</g>
+<g >
+<title>net.(*Resolver).resolveAddrList (1 samples, 2.56%)</title><rect x="524.4" y="197" width="30.2" height="15.0" fill="rgb(222,103,49)" rx="2" ry="2" />
+<text  x="527.36" y="207.5" >ne..</text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 2.56%)</title><rect x="191.5" y="405" width="30.3" height="15.0" fill="rgb(249,111,0)" rx="2" ry="2" />
+<text  x="194.54" y="415.5" >ru..</text>
+</g>
+<g >
+<title>runtime.markroot.func1 (2 samples, 5.13%)</title><rect x="857.2" y="533" width="60.5" height="15.0" fill="rgb(243,86,52)" rx="2" ry="2" />
+<text  x="860.18" y="543.5" >runtim..</text>
+</g>
+<g >
+<title>runtime.scanframeworker (1 samples, 2.56%)</title><rect x="887.4" y="453" width="30.3" height="15.0" fill="rgb(248,110,29)" rx="2" ry="2" />
+<text  x="890.44" y="463.5" >ru..</text>
+</g>
+<g >
+<title>encoding/json.(*Encoder).Encode (1 samples, 2.56%)</title><rect x="615.1" y="293" width="30.3" height="15.0" fill="rgb(232,127,7)" rx="2" ry="2" />
+<text  x="618.13" y="303.5" >en..</text>
+</g>
+<g >
+<title>github.com/gomodule/redigo/redis.Dial (5 samples, 12.82%)</title><rect x="463.8" y="245" width="151.3" height="15.0" fill="rgb(246,205,4)" rx="2" ry="2" />
+<text  x="466.85" y="255.5" >github.com/gomodule..</text>
+</g>
+<g >
+<title>runtime.runfinq (1 samples, 2.56%)</title><rect x="1129.5" y="613" width="30.2" height="15.0" fill="rgb(215,48,8)" rx="2" ry="2" />
+<text  x="1132.49" y="623.5" >ru..</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Context).Next (13 samples, 33.33%)</title><rect x="373.1" y="549" width="393.3" height="15.0" fill="rgb(222,182,49)" rx="2" ry="2" />
+<text  x="376.08" y="559.5" >github.com/gin-gonic/gin.(*Context).Next</text>
+</g>
+<g >
+<title>internal/poll.(*FD).Close (1 samples, 2.56%)</title><rect x="1129.5" y="581" width="30.2" height="15.0" fill="rgb(242,225,3)" rx="2" ry="2" />
+<text  x="1132.49" y="591.5" >in..</text>
+</g>
+<g >
+<title>net/textproto.(*Reader).ReadMIMEHeader (1 samples, 2.56%)</title><rect x="252.1" y="565" width="30.2" height="15.0" fill="rgb(212,60,3)" rx="2" ry="2" />
+<text  x="255.05" y="575.5" >ne..</text>
+</g>
+<g >
+<title>go-ws/middlewares.Cors.func1 (8 samples, 20.51%)</title><rect x="373.1" y="373" width="242.0" height="15.0" fill="rgb(250,159,16)" rx="2" ry="2" />
+<text  x="376.08" y="383.5" >go-ws/middlewares.Cors.func1</text>
+</g>
+<g >
+<title>github.com/gin-gonic/gin.(*Engine).ServeHTTP (14 samples, 35.90%)</title><rect x="373.1" y="581" width="423.6" height="15.0" fill="rgb(210,46,21)" rx="2" ry="2" />
+<text  x="376.08" y="591.5" >github.com/gin-gonic/gin.(*Engine).ServeHTTP</text>
+</g>
+<g >
+<title>net.(*TCPListener).Accept (1 samples, 2.56%)</title><rect x="70.5" y="581" width="30.3" height="15.0" fill="rgb(211,209,41)" rx="2" ry="2" />
+<text  x="73.51" y="591.5" >ne..</text>
+</g>
+<g >
+<title>go-ws/services/wsservice.(*Msg).PushWsMsgToQueue (5 samples, 12.82%)</title><rect x="463.8" y="325" width="151.3" height="15.0" fill="rgb(237,119,39)" rx="2" ry="2" />
+<text  x="466.85" y="335.5" >go-ws/services/wsse..</text>
+</g>
+<g >
+<title>net.(*netFD).Read (3 samples, 7.69%)</title><rect x="131.0" y="517" width="90.8" height="15.0" fill="rgb(237,181,26)" rx="2" ry="2" />
+<text  x="134.03" y="527.5" >net.(*netF..</text>
+</g>
+<g >
+<title>runtime.releaseSudog (1 samples, 2.56%)</title><rect x="40.3" y="581" width="30.2" height="15.0" fill="rgb(254,70,33)" rx="2" ry="2" />
+<text  x="43.26" y="591.5" >ru..</text>
+</g>
+<g >
+<title>internal/poll.(*FD).decref (1 samples, 2.56%)</title><rect x="1129.5" y="565" width="30.2" height="15.0" fill="rgb(221,175,25)" rx="2" ry="2" />
+<text  x="1132.49" y="575.5" >in..</text>
+</g>
+<g >
+<title>runtime.systemstack (5 samples, 12.82%)</title><rect x="857.2" y="597" width="151.3" height="15.0" fill="rgb(212,177,22)" rx="2" ry="2" />
+<text  x="860.18" y="607.5" >runtime.systemstack</text>
+</g>
+<g >
+<title>net.(*netFD).SetReadDeadline (1 samples, 2.56%)</title><rect x="342.8" y="549" width="30.3" height="15.0" fill="rgb(221,63,42)" rx="2" ry="2" />
+<text  x="345.82" y="559.5" >ne..</text>
+</g>
+<g >
+<title>syscall.Read (1 samples, 2.56%)</title><rect x="221.8" y="421" width="30.3" height="15.0" fill="rgb(205,106,23)" rx="2" ry="2" />
+<text  x="224.79" y="431.5" >sy..</text>
+</g>
+<g >
+<title>net.(*netFD).connect (2 samples, 5.13%)</title><rect x="554.6" y="85" width="60.5" height="15.0" fill="rgb(231,73,19)" rx="2" ry="2" />
+<text  x="557.62" y="95.5" >net.(*..</text>
+</g>
+<g >
+<title>net.(*conn).SetReadDeadline (1 samples, 2.56%)</title><rect x="342.8" y="565" width="30.3" height="15.0" fill="rgb(221,227,30)" rx="2" ry="2" />
+<text  x="345.82" y="575.5" >ne..</text>
+</g>
+<g >
+<title>runtime.acquirep (1 samples, 2.56%)</title><rect x="1008.5" y="549" width="30.2" height="15.0" fill="rgb(252,76,52)" rx="2" ry="2" />
+<text  x="1011.46" y="559.5" >ru..</text>
+</g>
+<g >
+<title>runtime.pcvalue (1 samples, 2.56%)</title><rect x="887.4" y="405" width="30.3" height="15.0" fill="rgb(222,12,50)" rx="2" ry="2" />
+<text  x="890.44" y="415.5" >ru..</text>
+</g>
+<g >
+<title>syscall.Read (3 samples, 7.69%)</title><rect x="131.0" y="485" width="90.8" height="15.0" fill="rgb(228,188,10)" rx="2" ry="2" />
+<text  x="134.03" y="495.5" >syscall.Read</text>
+</g>
+<g >
+<title>runtime.scanstack (2 samples, 5.13%)</title><rect x="857.2" y="501" width="60.5" height="15.0" fill="rgb(205,169,21)" rx="2" ry="2" />
+<text  x="860.18" y="511.5" >runtim..</text>
+</g>
+<g >
+<title>runtime.ready (1 samples, 2.56%)</title><rect x="282.3" y="469" width="30.3" height="15.0" fill="rgb(231,60,37)" rx="2" ry="2" />
+<text  x="285.31" y="479.5" >ru..</text>
+</g>
+<g >
+<title>io.copyBuffer (1 samples, 2.56%)</title><rect x="312.6" y="501" width="30.2" height="15.0" fill="rgb(241,84,4)" rx="2" ry="2" />
+<text  x="315.56" y="511.5" >io..</text>
+</g>
+<g >
+<title>fmt.Sprintf (1 samples, 2.56%)</title><rect x="736.2" y="501" width="30.2" height="15.0" fill="rgb(236,90,42)" rx="2" ry="2" />
+<text  x="739.15" y="511.5" >fm..</text>
+</g>
+<g >
+<title>io/ioutil.ReadAll (2 samples, 5.13%)</title><rect x="645.4" y="421" width="60.5" height="15.0" fill="rgb(253,35,3)" rx="2" ry="2" />
+<text  x="648.38" y="431.5" >io/iou..</text>
+</g>
+<g >
+<title>net.(*Dialer).Dial (3 samples, 7.69%)</title><rect x="524.4" y="229" width="90.7" height="15.0" fill="rgb(223,165,18)" rx="2" ry="2" />
+<text  x="527.36" y="239.5" >net.(*Dial..</text>
+</g>
+<g >
+<title>syscall.connect (2 samples, 5.13%)</title><rect x="554.6" y="53" width="60.5" height="15.0" fill="rgb(233,114,52)" rx="2" ry="2" />
+<text  x="557.62" y="63.5" >syscal..</text>
+</g>
+<g >
+<title>go-ws/middlewares.Recovery.func1 (12 samples, 30.77%)</title><rect x="373.1" y="469" width="363.1" height="15.0" fill="rgb(218,225,21)" rx="2" ry="2" />
+<text  x="376.08" y="479.5" >go-ws/middlewares.Recovery.func1</text>
+</g>
+<g >
+<title>go.uber.org/zap/zapcore.Field.AddTo (1 samples, 2.56%)</title><rect x="615.1" y="341" width="30.3" height="15.0" fill="rgb(207,49,1)" rx="2" ry="2" />
+<text  x="618.13" y="351.5" >go..</text>
+</g>
+<g >
+<title>runtime.notesleep (1 samples, 2.56%)</title><rect x="1099.2" y="533" width="30.3" height="15.0" fill="rgb(237,130,40)" rx="2" ry="2" />
+<text  x="1102.23" y="543.5" >ru..</text>
+</g>
+<g >
+<title>github.com/go-playground/validator/v10.(*validate).traverseField (1 samples, 2.56%)</title><rect x="403.3" y="181" width="30.3" height="15.0" fill="rgb(213,67,48)" rx="2" ry="2" />
+<text  x="406.33" y="191.5" >gi..</text>
+</g>
+</g>
+</svg>
