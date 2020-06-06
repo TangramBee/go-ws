@@ -1,0 +1,26 @@
+env="development"
+
+[db_university_circles]
+    [db_university_circles.development]
+    driver="mysql"
+    host="127.0.0.1"
+    port="3306"
+    database="him"
+    username="root"
+    password="123456"
+    timeout=1
+    maxIdle=10
+    maxOpen=1000
+    maxLifetime=300
+
+    [db_university_circles.production]
+    driver="mysql"
+    host="127.0.0.1"
+    port="3306"
+    database="him"
+    username="root"
+    password="123456"
+    timeout=1
+    maxIdle=10
+    maxOpen=1000
+    maxLifetime=300

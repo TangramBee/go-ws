@@ -1,0 +1,68 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf8">
+<title>Insert title here</title>
+<script src="https://apps.bdimg.com/libs/jquery/2.1.4/jquery.min.js"></script>
+<script type="text/javascript">
+ 
+var websocket;
+ 
+// 首先判断是否 支持 WebSocket
+ if('WebSocket' in window) {
+     websocket = new WebSocket("ws://127.0.0.1:10186/ws/connection/add?uid=123123");
+ } else if('MozWebSocket' in window) {
+     websocket = new MozWebSocket("ws://127.0.0.1:10186/ws/connection/add?uid=123123");
+ } else {
+     websocket = new SockJS("ws://127.0.0.1:10186/ws/connection/add?uid=123123");
+ }
+ 
+ // 打开连接时
+ websocket.onopen = function(evnt) {
+     console.log("  websocket.onopen  ");
+ };
+ 
+ // 收到消息时
+ websocket.onmessage = function(evnt) {
+     // alert(evnt.data);
+     console.log(evnt.data);
+     $("#rec_msg").append(evnt.data+"<br>");
+
+      
+ };
+ 
+ websocket.onerror = function(evnt) {
+     console.log("  websocket.onerror  ");
+ };
+ 
+ websocket.onclose = function(evnt) {
+     console.log("  websocket.onclose  ");
+ };
+ 
+ 
+function say(){
+  //客户端主动发消息
+  $.ajax({
+    type: "POST",
+    url: "http://127.0.0.1:10186/ws/msg/send",
+    data: {uid: 123123, content:document.getElementById('msg').value, retries:2},
+    dataType: "json",
+    success: function(data){
+      console.log(data);
+    }
+  });
+
+}
+ 
+</script>
+</head>
+<body>
+  <div>
+<input type="text" value="发送" id="msg"><button value="发送" id="send" onclick="say()">发送</button>
+</div>
+
+<div id="rec_msg"></div>
+    
+</body>
+</html>
+

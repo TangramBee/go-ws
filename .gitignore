@@ -1,0 +1,9 @@
+.idea/
+.vscode/
+.svn/
+appdata
+.history/
+update.zip
+.git/
+.config/
+.DS_Store/

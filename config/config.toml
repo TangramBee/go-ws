@@ -1,0 +1,11 @@
+env = "development"
+[app]
+    name = "unity_agent_gateway"
+    bind = "0.0.0.0:10186"
+    debug = 1
+
+[log]
+    path =  "/data/logs/ws/"
+    access_log = "access.log"
+    run_log = "run.log"
+
